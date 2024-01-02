@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"cloud.google.com/go/cloudsqlconn/errtype"
@@ -293,7 +294,7 @@ func (d *Dialer) Dial(ctx context.Context, icn string, opts ...DialOption) (conn
 	return newInstrumentedConn(tlsConn, func() {
 		n := atomic.AddUint64(i.OpenConns(), ^uint64(0))
 		trace.RecordOpenConnections(context.Background(), int64(n), d.dialerID, cn.String())
-	}), nil
+	}, conn.(syscall.Conn)), nil
 }
 
 func invalidClientCert(c *tls.Config) bool {
@@ -344,11 +345,18 @@ func (d *Dialer) Warmup(_ context.Context, icn string, opts ...DialOption) error
 
 // newInstrumentedConn initializes an instrumentedConn that on closing will
 // decrement the number of open connects and record the result.
-func newInstrumentedConn(conn net.Conn, closeFunc func()) *instrumentedConn {
-	return &instrumentedConn{
+func newInstrumentedConn(conn net.Conn, closeFunc func(), sysConn syscall.Conn) net.Conn {
+	c := &instrumentedConn{
 		Conn:      conn,
 		closeFunc: closeFunc,
 	}
+	if sysConn != nil {
+		return &instrumentedSysConn{
+			instrumentedConn: *c,
+			Conn:             sysConn,
+		}
+	}
+	return c
 }
 
 // instrumentedConn wraps a net.Conn and invokes closeFunc when the connection
@@ -356,6 +364,11 @@ func newInstrumentedConn(conn net.Conn, closeFunc func()) *instrumentedConn {
 type instrumentedConn struct {
 	net.Conn
 	closeFunc func()
+}
+
+type instrumentedSysConn struct {
+	instrumentedConn
+	syscall.Conn
 }
 
 // Close delegates to the underlying net.Conn interface and reports the close
